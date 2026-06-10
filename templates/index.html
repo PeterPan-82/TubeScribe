@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube Transcript Extractor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #fafaf8;
+    --surface: #ffffff;
+    --surface2: #f3f3ef;
+    --border: #e0e0d8;
+    --border-strong: #c8c8be;
+    --text: #1a1a18;
+    --text2: #5a5a54;
+    --text3: #9a9a90;
+    --accent: #2563eb;
+    --accent-bg: #eff6ff;
+    --accent-border: #93c5fd;
+    --success: #16a34a;
+    --danger: #dc2626;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 0;
+    background: var(--surface);
+  }
+  .header-inner {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .logo { font-size: 22px; }
+  header h1 { font-size: 17px; font-weight: 600; }
+  header p { font-size: 13px; color: var(--text2); margin-left: auto; }
+
+  main {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+  }
+
+  .section-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text2);
+    margin-bottom: 10px;
+  }
+
+  .block { margin-bottom: 28px; }
+
+  /* URL input */
+  .url-row { display: flex; gap: 10px; }
+  .url-row input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    background: var(--surface);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .url-row input:focus { border-color: var(--accent); }
+  .url-row input::placeholder { color: var(--text3); }
+
+  .btn-primary {
+    padding: 10px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Mode cards */
+  .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .mode-card {
+    cursor: pointer;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    transition: border-color 0.15s;
+    user-select: none;
+  }
+  .mode-card:hover { border-color: var(--border-strong); }
+  .mode-card.active {
+    border-color: var(--accent);
+    border-width: 2px;
+    background: var(--accent-bg);
+  }
+  .mode-card .icon { font-size: 20px; margin-bottom: 6px; }
+  .mode-card .title { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .mode-card .desc { font-size: 12px; color: var(--text2); }
+
+  /* Sub-panel */
+  .sub-panel {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+  }
+  .sub-panel .sub-label { font-size: 13px; font-weight: 500; margin-bottom: 12px; }
+
+  .radio-stack { display: flex; flex-direction: column; gap: 10px; }
+  .radio-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .radio-row input[type="radio"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+  .radio-row input[type="number"] {
+    width: 68px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    background: var(--surface);
+    color: var(--text);
+    outline: none;
+  }
+  .radio-row input[type="number"]:focus { border-color: var(--accent); }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+  .scan-limit-panel { display: none; }
+  .scan-limit-panel .sl-title { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+  .scan-limit-panel .sl-desc { font-size: 12px; color: var(--text2); margin-bottom: 12px; }
+  .scan-hint {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text3);
+    font-style: italic;
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+  }
+
+  /* Action cards */
+  .action-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .action-card {
+    cursor: pointer;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    transition: border-color 0.15s;
+    user-select: none;
+  }
+  .action-card:hover { border-color: var(--border-strong); }
+  .action-card.active {
+    border-color: var(--accent);
+    border-width: 2px;
+    background: var(--accent-bg);
+  }
+  .action-card .ac-icon { font-size: 20px; margin-bottom: 6px; }
+  .action-card .ac-title { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .action-card .ac-desc { font-size: 11px; color: var(--text2); }
+
+  /* Magazine image sub-panel */
+  .mag-image-panel {
+    display: none;
+    margin-top: 10px;
+  }
+  .img-option-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .img-option {
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    transition: border-color 0.15s;
+    user-select: none;
+  }
+  .img-option:hover { border-color: var(--border-strong); }
+  .img-option.active {
+    border-color: var(--accent);
+    border-width: 2px;
+    background: var(--accent-bg);
+  }
+  .img-option .io-icon { font-size: 22px; flex-shrink: 0; margin-top: 1px; }
+  .img-option .io-title { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .img-option .io-desc { font-size: 12px; color: var(--text2); }
+  .io-note {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--border-strong);
+  }
+
+  /* Format pills */
+  .fmt-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .fmt-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    user-select: none;
+  }
+  .fmt-label:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    font-weight: 500;
+  }
+  .fmt-label input { accent-color: var(--accent); cursor: pointer; }
+
+  /* Language checkboxes */
+  .lang-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .lang-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    user-select: none;
+  }
+  .lang-label:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+  }
+  .lang-label input { accent-color: var(--accent); cursor: pointer; }
+
+  /* Progress panel */
+  .progress-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+  }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .stat-num { font-size: 22px; font-weight: 600; color: var(--text); }
+  .stat-num.success { color: var(--success); }
+  .stat-num.danger { color: var(--danger); }
+  .stat-num.muted { color: var(--text3); }
+  .stat-lbl { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+  .progress-bar-wrap {
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    display: none;
+  }
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.4s ease;
+    width: 0%;
+  }
+
+  .log-area {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .log-empty {
+    font-size: 13px;
+    color: var(--text3);
+    text-align: center;
+    padding: 10px 0;
+    font-style: italic;
+  }
+  .log-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .log-entry:last-child { border-bottom: none; }
+  .log-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .log-dot.ok { background: var(--success); }
+  .log-dot.fail { background: var(--danger); }
+  .log-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .done-bar {
+    display: none;
+    margin-top: 14px;
+    padding: 12px 16px;
+    background: #f0fdf4;
+    border: 1px solid #86efac;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    color: #15803d;
+    display: none;
+    align-items: center;
+    gap: 10px;
+  }
+  .done-bar.show { display: flex; }
+  .btn-download {
+    margin-left: auto;
+    padding: 7px 16px;
+    background: var(--success);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-download:hover { background: #15803d; }
+
+  .error-bar {
+    display: none;
+    margin-top: 14px;
+    padding: 12px 16px;
+    background: #fef2f2;
+    border: 1px solid #fca5a5;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    color: var(--danger);
+  }
+  .error-bar.show { display: block; }
+
+  @media (max-width: 560px) {
+    .mode-grid { grid-template-columns: 1fr; }
+    .action-grid { grid-template-columns: repeat(2, 1fr); }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .img-option-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <span class="logo">📼</span>
+    <h1>YouTube Transcript Extractor</h1>
+    <p>Extract · Process · Export</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- URL -->
+  <div class="block">
+    <div class="section-label">YouTube URL</div>
+    <div class="url-row">
+      <input type="text" id="url-input"
+             placeholder="https://youtube.com/watch?v=... or /channel/... or /playlist?list=..." />
+      <button class="btn-primary" id="extract-btn" onclick="startExtraction()">Extract →</button>
+    </div>
+  </div>
+
+  <!-- Source type -->
+  <div class="block">
+    <div class="section-label">Source type</div>
+    <div class="mode-grid">
+      <div class="mode-card active" id="m-single" onclick="setMode('single')">
+        <div class="icon">🎬</div>
+        <div class="title">Single video</div>
+        <div class="desc">One video URL.</div>
+      </div>
+      <div class="mode-card" id="m-channel" onclick="setMode('channel')">
+        <div class="icon">📺</div>
+        <div class="title">Channel</div>
+        <div class="desc">All or N videos from a channel.</div>
+      </div>
+      <div class="mode-card" id="m-playlist" onclick="setMode('playlist')">
+        <div class="icon">📋</div>
+        <div class="title">Playlist</div>
+        <div class="desc">All or N videos from a playlist.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Multi-video options -->
+  <div class="block" id="multi-options" style="display:none;">
+    <div class="sub-panel">
+      <div class="sub-label">How many transcripts?</div>
+      <div class="radio-stack">
+        <label class="radio-row">
+          <input type="radio" name="scope" value="all" checked onchange="updateScopeUI()">
+          All available transcripts
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="scope" value="latest" onchange="updateScopeUI()">
+          Latest
+          <input type="number" id="n-latest" value="20" min="1">
+          videos (take whatever has subtitles)
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="scope" value="guaranteed" id="scope-guaranteed" onchange="updateScopeUI()">
+          Guaranteed
+          <input type="number" id="n-guaranteed" value="50" min="1" oninput="updateScanHint()">
+          successful transcripts
+        </label>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Scan limit -->
+      <div class="scan-limit-panel" id="scan-limit-panel">
+        <div class="sl-title">🛡 Scan limit</div>
+        <div class="sl-desc">Stops scanning once this threshold is hit, even if the target hasn't been reached — prevents endlessly scanning a large channel with few subtitled videos.</div>
+        <div class="radio-stack">
+          <label class="radio-row">
+            <input type="radio" name="slimit" value="multiplier" checked onchange="updateScanHint()">
+            Scan up to
+            <input type="number" id="sl-mult" value="3" min="1" max="20" oninput="updateScanHint()">
+            × the target
+          </label>
+          <label class="radio-row">
+            <input type="radio" name="slimit" value="absolute" onchange="updateScanHint()">
+            Scan at most
+            <input type="number" id="sl-abs" value="200" min="1" oninput="updateScanHint()">
+            videos total
+          </label>
+        </div>
+        <div class="scan-hint" id="scan-hint">With target 50 and multiplier 3×, scanning stops after 150 videos or 50 successes — whichever comes first.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Action -->
+  <div class="block">
+    <div class="section-label">What to do with the transcripts</div>
+    <div class="action-grid">
+      <div class="action-card active" id="ac-plain" onclick="setAction('plain')">
+        <div class="ac-icon">📄</div>
+        <div class="ac-title">Plain text</div>
+        <div class="ac-desc">Cleaned, no timestamps.</div>
+      </div>
+      <div class="action-card" id="ac-summary" onclick="setAction('summary')">
+        <div class="ac-icon">📝</div>
+        <div class="ac-title">Summary</div>
+        <div class="ac-desc">Key points, condensed.</div>
+      </div>
+      <div class="action-card" id="ac-booklet" onclick="setAction('booklet')">
+        <div class="ac-icon">📖</div>
+        <div class="ac-title">Booklet</div>
+        <div class="ac-desc">Formatted for reading.</div>
+      </div>
+      <div class="action-card" id="ac-magazine" onclick="setAction('magazine')">
+        <div class="ac-icon">🗞</div>
+        <div class="ac-title">Magazine</div>
+        <div class="ac-desc">Styled HTML layout.</div>
+      </div>
+    </div>
+
+    <!-- Magazine image sub-options -->
+    <div class="mag-image-panel" id="mag-image-panel">
+      <div class="sub-panel" style="margin-top:10px;">
+        <div class="sub-label">Illustrations</div>
+        <div class="img-option-grid">
+          <div class="img-option" id="img-none" onclick="setImgOpt(false)">
+            <div class="io-icon">🚫</div>
+            <div>
+              <div class="io-title">Text only</div>
+              <div class="io-desc">Clean typographic layout, no images.</div>
+            </div>
+          </div>
+          <div class="img-option active" id="img-auto" onclick="setImgOpt(true)">
+            <div class="io-icon">🔍</div>
+            <div>
+              <div class="io-title">Include images</div>
+              <div class="io-desc">Relevant images sourced where they genuinely fit.</div>
+            </div>
+          </div>
+        </div>
+        <div class="io-note">Images are fetched from Wikimedia Commons. If nothing relevant is found for a section, that section runs without an image — no filler.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Output format -->
+  <div class="block">
+    <div class="section-label">Output format</div>
+    <div class="fmt-row">
+      <label class="fmt-label"><input type="radio" name="fmt" value="md" checked> Markdown</label>
+      <label class="fmt-label"><input type="radio" name="fmt" value="html"> HTML</label>
+      <label class="fmt-label"><input type="radio" name="fmt" value="pdf"> PDF</label>
+      <label class="fmt-label"><input type="radio" name="fmt" value="docx"> Word (.docx)</label>
+    </div>
+  </div>
+
+  <!-- Language preference -->
+  <div class="block">
+    <div class="section-label">Subtitle language preference (checked = try these, in order)</div>
+    <div class="lang-row">
+      <label class="lang-label"><input type="checkbox" value="en" checked> English</label>
+      <label class="lang-label"><input type="checkbox" value="de" checked> German</label>
+      <label class="lang-label"><input type="checkbox" value="es" checked> Spanish</label>
+      <label class="lang-label"><input type="checkbox" value="fa" checked> Persian / Farsi</label>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="block" style="margin-bottom:0;">
+    <div class="section-label">Progress</div>
+    <div class="progress-panel">
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="stat-num muted" id="stat-scanned">—</div>
+          <div class="stat-lbl">Scanned</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num success" id="stat-extracted">—</div>
+          <div class="stat-lbl">Extracted</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num danger" id="stat-failed">—</div>
+          <div class="stat-lbl">Failed</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num muted" id="stat-target">—</div>
+          <div class="stat-lbl">Target</div>
+        </div>
+      </div>
+
+      <div class="progress-bar-wrap" id="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+
+      <div class="log-area" id="log-area">
+        <div class="log-empty" id="log-empty">Paste a URL and hit Extract to begin.</div>
+      </div>
+
+      <div class="done-bar" id="done-bar">
+        ✅ Done! Your file is ready.
+        <a class="btn-download" id="download-link" href="#" download>⬇ Download</a>
+      </div>
+      <div class="error-bar" id="error-bar"></div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let currentMode = 'single';
+  let currentAction = 'plain';
+  let includeImages = true;
+  let currentJobId = null;
+  let evtSource = null;
+
+  // ── Mode ───────────────────────────────────────────────────────────────────
+  function setMode(m) {
+    currentMode = m;
+    ['single', 'channel', 'playlist'].forEach(id => {
+      document.getElementById('m-' + id).classList.toggle('active', id === m);
+    });
+    document.getElementById('multi-options').style.display = m === 'single' ? 'none' : 'block';
+  }
+
+  // ── Scope / scan limit ─────────────────────────────────────────────────────
+  function updateScopeUI() {
+    const isG = document.querySelector('input[name="scope"][value="guaranteed"]').checked;
+    document.getElementById('scan-limit-panel').style.display = isG ? 'block' : 'none';
+    if (isG) updateScanHint();
+  }
+
+  function updateScanHint() {
+    const target = parseInt(document.getElementById('n-guaranteed').value) || 50;
+    const isMult = document.querySelector('input[name="slimit"][value="multiplier"]').checked;
+    let txt;
+    if (isMult) {
+      const mult = parseInt(document.getElementById('sl-mult').value) || 3;
+      txt = `With target ${target} and multiplier ${mult}×, scanning stops after ${target * mult} videos or ${target} successes — whichever comes first.`;
+    } else {
+      const abs = parseInt(document.getElementById('sl-abs').value) || 200;
+      txt = `Scanning stops after ${abs} videos or ${target} successes — whichever comes first.`;
+    }
+    document.getElementById('scan-hint').textContent = txt;
+  }
+
+  // ── Action ─────────────────────────────────────────────────────────────────
+  function setAction(a) {
+    currentAction = a;
+    ['plain', 'summary', 'booklet', 'magazine'].forEach(id => {
+      document.getElementById('ac-' + id).classList.toggle('active', id === a);
+    });
+    document.getElementById('mag-image-panel').style.display = a === 'magazine' ? 'block' : 'none';
+  }
+
+  // ── Image option ───────────────────────────────────────────────────────────
+  function setImgOpt(val) {
+    includeImages = val;
+    document.getElementById('img-none').classList.toggle('active', !val);
+    document.getElementById('img-auto').classList.toggle('active', val);
+  }
+
+  // ── Progress helpers ───────────────────────────────────────────────────────
+  function resetProgress() {
+    ['stat-scanned', 'stat-extracted', 'stat-failed', 'stat-target'].forEach(id => {
+      document.getElementById(id).textContent = '—';
+    });
+    document.getElementById('log-area').innerHTML = '<div class="log-empty">Extracting…</div>';
+    document.getElementById('done-bar').classList.remove('show');
+    document.getElementById('error-bar').classList.remove('show');
+    document.getElementById('progress-bar-wrap').style.display = 'none';
+    document.getElementById('progress-bar').style.width = '0%';
+  }
+
+  function updateStats(data) {
+    document.getElementById('stat-scanned').textContent = data.scanned ?? '—';
+    document.getElementById('stat-extracted').textContent = data.extracted ?? '—';
+    document.getElementById('stat-failed').textContent = data.failed ?? '—';
+    document.getElementById('stat-target').textContent = data.target ?? '∞';
+
+    if (data.target) {
+      const pct = Math.min(100, Math.round((data.extracted / data.target) * 100));
+      document.getElementById('progress-bar-wrap').style.display = 'block';
+      document.getElementById('progress-bar').style.width = pct + '%';
+    }
+  }
+
+  function appendLog(entries) {
+    const area = document.getElementById('log-area');
+    const empty = area.querySelector('.log-empty');
+    if (empty) empty.remove();
+    entries.forEach(e => {
+      const id = 'log-' + e.ts;
+      if (document.getElementById(id)) return;
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+      div.id = id;
+      div.innerHTML = `<span class="log-dot ${e.status}"></span><span class="log-title">${escHtml(e.title)}</span><span style="font-size:12px;color:var(--text3);flex-shrink:0;">${e.status === 'ok' ? '✓' : '✗'}</span>`;
+      area.appendChild(div);
+    });
+    area.scrollTop = area.scrollHeight;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Extraction ─────────────────────────────────────────────────────────────
+  function startExtraction() {
+    const url = document.getElementById('url-input').value.trim();
+    if (!url) { alert('Please paste a YouTube URL.'); return; }
+
+    const langs = Array.from(document.querySelectorAll('.lang-label input:checked')).map(el => el.value);
+    if (!langs.length) { alert('Select at least one subtitle language.'); return; }
+
+    // Collect params
+    const scope = currentMode === 'single' ? 'single'
+                : document.querySelector('input[name="scope"]:checked').value;
+    const n_latest = parseInt(document.getElementById('n-latest')?.value) || 20;
+    const n_guaranteed = parseInt(document.getElementById('n-guaranteed')?.value) || 50;
+    const sl_type = document.querySelector('input[name="slimit"]:checked')?.value || 'multiplier';
+    const sl_mult = parseInt(document.getElementById('sl-mult')?.value) || 3;
+    const sl_abs = parseInt(document.getElementById('sl-abs')?.value) || 200;
+    const fmt = document.querySelector('input[name="fmt"]:checked').value;
+
+    const params = {
+      url,
+      source: currentMode,
+      scope,
+      n: scope === 'guaranteed' ? n_guaranteed : n_latest,
+      scan_limit_type: sl_type,
+      scan_limit_mult: sl_mult,
+      scan_limit_abs: sl_abs,
+      action: currentAction,
+      fmt,
+      include_images: currentAction === 'magazine' && includeImages,
+      languages: langs
+    };
+
+    // Reset UI
+    resetProgress();
+    const btn = document.getElementById('extract-btn');
+    btn.disabled = true;
+    btn.textContent = 'Extracting…';
+
+    // Close any previous SSE
+    if (evtSource) { evtSource.close(); evtSource = null; }
+
+    // Start job
+    fetch('/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    })
+    .then(r => r.json())
+    .then(data => {
+      currentJobId = data.job_id;
+      evtSource = new EventSource(`/progress/${currentJobId}`);
+      evtSource.onmessage = function(ev) {
+        const d = JSON.parse(ev.data);
+        if (d.error && !d.status) {
+          showError(d.error);
+          return;
+        }
+        updateStats(d);
+        if (d.log && d.log.length) appendLog(d.log);
+        if (d.status === 'done') {
+          evtSource.close();
+          btn.disabled = false;
+          btn.textContent = 'Extract →';
+          if (d.error) {
+            showError(d.error);
+          } else {
+            const bar = document.getElementById('done-bar');
+            bar.classList.add('show');
+            document.getElementById('download-link').href = `/download/${currentJobId}`;
+          }
+        }
+        if (d.status === 'error') {
+          evtSource.close();
+          btn.disabled = false;
+          btn.textContent = 'Extract →';
+          showError(d.error || 'An unexpected error occurred.');
+        }
+      };
+      evtSource.onerror = function() {
+        evtSource.close();
+        btn.disabled = false;
+        btn.textContent = 'Extract →';
+      };
+    })
+    .catch(err => {
+      showError('Could not start extraction: ' + err.message);
+      btn.disabled = false;
+      btn.textContent = 'Extract →';
+    });
+  }
+
+  function showError(msg) {
+    const bar = document.getElementById('error-bar');
+    bar.textContent = '⚠ ' + msg;
+    bar.classList.add('show');
+  }
+
+  // Allow Enter key in URL field
+  document.getElementById('url-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') startExtraction();
+  });
+</script>
+
+</body>
+</html>
