@@ -87,7 +87,7 @@ def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
             "writesubtitles": True,
             "writeautomaticsub": True,
             "subtitleslangs": languages + ["en"],  # always try en as last resort
-            "subtitlesformat": "vtt",
+            "format": "bestaudio/best",            # prevents "format not available" error
             "outtmpl": os.path.join(tmpdir, "sub.%(ext)s"),
         }
         cf = _cookies_file(tmpdir)
@@ -100,11 +100,13 @@ def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
         except Exception:
             pass
 
-        # Find any downloaded .vtt file
-        vtt_files = sorted(glob.glob(os.path.join(tmpdir, "*.vtt")))
-        if not vtt_files:
+        # Find any downloaded subtitle file (.vtt, .srt, .ttml, etc.)
+        sub_files = []
+        for ext in ("*.vtt", "*.srt", "*.ttml", "*.srv3", "*.srv2", "*.srv1"):
+            sub_files += glob.glob(os.path.join(tmpdir, ext))
+        if not sub_files:
             return None
-        with open(vtt_files[0], "r", encoding="utf-8") as f:
+        with open(sub_files[0], "r", encoding="utf-8") as f:
             return _parse_vtt(f.read())
 
 
