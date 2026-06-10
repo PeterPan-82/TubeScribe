@@ -77,18 +77,17 @@ def _parse_vtt(content: str) -> str | None:
 
 
 def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
-    """Download subtitles with yt-dlp and parse the VTT result."""
+    """
+    Extract subtitle URLs from video info via yt-dlp, then download directly.
+    This avoids the format-selection errors that occur with writesubtitles+skip_download.
+    """
+    import requests as req
     url = f"https://www.youtube.com/watch?v={video_id}"
     with tempfile.TemporaryDirectory() as tmpdir:
         opts = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": languages + ["en"],  # always try en as last resort
-            "format": "bestaudio/best",            # prevents "format not available" error
-            "outtmpl": os.path.join(tmpdir, "sub.%(ext)s"),
         }
         cf = _cookies_file(tmpdir)
         if cf:
@@ -96,18 +95,50 @@ def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                info = ydl.extract_info(url, download=False)
         except Exception:
-            pass
-
-        # Find any downloaded subtitle file (.vtt, .srt, .ttml, etc.)
-        sub_files = []
-        for ext in ("*.vtt", "*.srt", "*.ttml", "*.srv3", "*.srv2", "*.srv1"):
-            sub_files += glob.glob(os.path.join(tmpdir, ext))
-        if not sub_files:
             return None
-        with open(sub_files[0], "r", encoding="utf-8") as f:
-            return _parse_vtt(f.read())
+
+        if not info:
+            return None
+
+        # Search manual subtitles first, then auto-captions
+        all_subs = info.get("subtitles", {})
+        auto_subs = info.get("automatic_captions", {})
+
+        sub_url = None
+        for lang in languages + ["en"]:
+            for source in (all_subs, auto_subs):
+                if lang not in source:
+                    continue
+                formats = source[lang]
+                # Prefer VTT, then any available format
+                for preferred_ext in ("vtt", "ttml", "srv3", "srv2", "srv1", "json3"):
+                    for fmt in formats:
+                        if fmt.get("ext") == preferred_ext and fmt.get("url"):
+                            sub_url = fmt["url"]
+                            break
+                    if sub_url:
+                        break
+                if not sub_url:
+                    for fmt in formats:
+                        if fmt.get("url"):
+                            sub_url = fmt["url"]
+                            break
+            if sub_url:
+                break
+
+        if not sub_url:
+            return None
+
+        # Download the subtitle file directly
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = req.get(sub_url, headers=headers, timeout=15)
+            r.raise_for_status()
+            return _parse_vtt(r.text)
+        except Exception:
+            return None
 
 
 def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
