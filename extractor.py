@@ -134,64 +134,58 @@ def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
 
 # ---------------------------------------------------------------------------
 # Extractor 2: yt-dlp (fallback)
-# Gets subtitle URLs from video info, downloads them directly
+# Mirrors the working local script: writes subtitle .vtt to disk, reads it back.
+# Uses download=True + skip_download=True so yt-dlp handles the subtitle fetch
+# itself (no manual URL extraction or separate requests call).
 # ---------------------------------------------------------------------------
 
 def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
-    import requests as req
+    import glob as _glob
     url = f"https://www.youtube.com/watch?v={video_id}"
+    # Build subtitle language list: preferred langs + common English fallbacks
+    sub_langs = languages + ["en", "en-US", "en-GB", "en.*"]
+    # Deduplicate while preserving order
+    seen = set()
+    sub_langs = [l for l in sub_langs if not (l in seen or seen.add(l))]
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+        base = os.path.join(tmpdir, video_id)
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,       # Don't download the video
+            "writesubtitles": True,      # Write manual subtitles
+            "writeautomaticsub": True,   # Write auto-generated subtitles
+            "subtitleslangs": sub_langs,
+            "subtitlesformat": "vtt",
+            "outtmpl": base,
+            "noplaylist": True,
+            "ignoreerrors": True,
+        }
         cf = _cookies_file(tmpdir)
         if cf:
             opts["cookiefile"] = cf
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                ydl.extract_info(url, download=True)
         except Exception as e:
             log.warning("yt-dlp extract_info failed: %s", e)
             return None
 
-        if not info:
+        # Find any .vtt file that was written
+        vtt_files = _glob.glob(base + "*.vtt")
+        if not vtt_files:
+            log.warning("yt-dlp: no .vtt file written to disk")
             return None
 
-        all_subs = info.get("subtitles", {})
-        auto_subs = info.get("automatic_captions", {})
-        log.info("yt-dlp subs available: manual=%s auto=%s",
-                 list(all_subs.keys()), list(auto_subs.keys()))
-
-        sub_url = None
-        for lang in languages + ["en"]:
-            for source in (all_subs, auto_subs):
-                if lang not in source:
-                    continue
-                formats = source[lang]
-                for preferred_ext in ("vtt", "ttml", "srv3", "srv2", "srv1", "json3"):
-                    for fmt in formats:
-                        if fmt.get("ext") == preferred_ext and fmt.get("url"):
-                            sub_url = fmt["url"]
-                            break
-                    if sub_url:
-                        break
-                if not sub_url:
-                    for fmt in formats:
-                        if fmt.get("url"):
-                            sub_url = fmt["url"]
-                            break
-            if sub_url:
-                break
-
-        if not sub_url:
-            log.warning("yt-dlp: no subtitle URL found")
-            return None
-
+        vtt_path = sorted(vtt_files)[0]
+        log.info("yt-dlp: found subtitle file %s", os.path.basename(vtt_path))
         try:
-            r = req.get(sub_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            r.raise_for_status()
-            return _parse_vtt(r.text)
+            with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
+                return _parse_vtt(f.read())
         except Exception as e:
-            log.warning("Subtitle download failed: %s", e)
+            log.warning("yt-dlp: failed to read vtt file: %s", e)
             return None
 
 
