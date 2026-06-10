@@ -1,7 +1,7 @@
 """
 Transcript extraction.
 Primary: youtube-transcript-api (lighter, uses Innertube API, less bot-detectable).
-Fallback: yt-dlp extract_info + direct subtitle download.
+Fallback: yt-dlp — writes subtitle .vtt to disk, reads it back.
 
 Cookies: set the YT_COOKIES environment variable to the full text of a
 Netscape-format cookies.txt file exported from your browser while logged
@@ -9,22 +9,25 @@ into YouTube. Both extractors will use them.
 """
 import re
 import os
-import logging
 import tempfile
+import glob as _glob
 import yt_dlp
 
 try:
-    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    from youtube_transcript_api import YouTubeTranscriptApi
     _HAS_YT_API = True
 except ImportError:
     _HAS_YT_API = False
-
-log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _p(msg):
+    """Print to stdout so it always appears in Render logs."""
+    print(f"[extractor] {msg}", flush=True)
+
 
 def _video_id_from_url(url: str) -> str | None:
     patterns = [
@@ -43,19 +46,19 @@ def _cookies_file(tmpdir: str) -> str | None:
     """Write YT_COOKIES env var to a temp file and return its path, or None."""
     cookies = os.environ.get("YT_COOKIES", "").strip()
     if not cookies:
-        log.warning("YT_COOKIES not set — requests will be unauthenticated")
+        _p("WARNING: YT_COOKIES not set — requests will be unauthenticated")
         return None
-    # Handle Render possibly escaping newlines as literal \n
+    # Render sometimes stores literal \n instead of real newlines
     cookies = cookies.replace("\\n", "\n")
     path = os.path.join(tmpdir, "cookies.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(cookies)
-    log.info("Cookies file written (%d bytes)", len(cookies))
+    _p(f"Cookies file written ({len(cookies)} bytes, {cookies.count(chr(10))} lines)")
     return path
 
 
 def _parse_vtt(content: str) -> str | None:
-    """Extract plain text from a WebVTT/SRT subtitle file."""
+    """Extract plain text from a WebVTT subtitle file."""
     lines = content.split("\n")
     texts = []
     for line in lines:
@@ -66,13 +69,18 @@ def _parse_vtt(content: str) -> str | None:
             continue
         if re.match(r"^\d+$", line):
             continue
+        # Strip VTT timing tags like <00:00:01.234>
+        line = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", " ", line)
+        line = re.sub(r"</?c>", " ", line)
         line = re.sub(r"<[^>]+>", "", line)
         line = re.sub(r"&amp;", "&", line)
         line = re.sub(r"&lt;", "<", line)
         line = re.sub(r"&gt;", ">", line)
-        line = line.strip()
+        line = re.sub(r"&nbsp;", " ", line)
+        line = re.sub(r"\s+", " ", line).strip()
         if line:
             texts.append(line)
+    # Deduplicate consecutive identical lines
     deduped = []
     for t in texts:
         if not deduped or t != deduped[-1]:
@@ -85,27 +93,28 @@ def _parse_vtt(content: str) -> str | None:
 
 # ---------------------------------------------------------------------------
 # Extractor 1: youtube-transcript-api (primary)
-# Uses the Innertube /get_transcript endpoint — lighter and less detectable
 # ---------------------------------------------------------------------------
 
 def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
     if not _HAS_YT_API:
-        log.warning("youtube-transcript-api not available")
+        _p("youtube-transcript-api not installed, skipping")
         return None
+    _p(f"Trying youtube-transcript-api for {video_id} ...")
     with tempfile.TemporaryDirectory() as tmpdir:
         cf = _cookies_file(tmpdir)
         kwargs = {"cookies": cf} if cf else {}
         try:
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, **kwargs)
         except Exception as e:
-            log.warning("YT-API list_transcripts failed: %s", e)
+            _p(f"YT-API list_transcripts FAILED: {e}")
             return None
 
         transcript = None
+        # Try manual transcripts first, then auto-generated
         for lang in languages:
             try:
                 transcript = transcript_list.find_manually_created_transcript([lang])
-                log.info("Found manual transcript: %s", lang)
+                _p(f"Found manual transcript: {lang}")
                 break
             except Exception:
                 pass
@@ -113,12 +122,12 @@ def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
             for lang in languages:
                 try:
                     transcript = transcript_list.find_generated_transcript([lang])
-                    log.info("Found auto transcript: %s", lang)
+                    _p(f"Found auto-generated transcript: {lang}")
                     break
                 except Exception:
                     pass
         if transcript is None:
-            log.warning("No transcript found for languages %s", languages)
+            _p(f"YT-API: no transcript for languages {languages}")
             return None
 
         try:
@@ -126,36 +135,33 @@ def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
             text = " ".join(e["text"] for e in entries)
             text = re.sub(r"\[.*?\]", "", text)
             text = re.sub(r"\s+", " ", text).strip()
+            _p(f"YT-API SUCCESS: {len(text)} chars")
             return text if text else None
         except Exception as e:
-            log.warning("YT-API fetch failed: %s", e)
+            _p(f"YT-API fetch FAILED: {e}")
             return None
 
 
 # ---------------------------------------------------------------------------
 # Extractor 2: yt-dlp (fallback)
-# Mirrors the working local script: writes subtitle .vtt to disk, reads it back.
-# Uses download=True + skip_download=True so yt-dlp handles the subtitle fetch
-# itself (no manual URL extraction or separate requests call).
+# Writes subtitle .vtt to a temp dir, reads it back — same as the working
+# local Colab script.
 # ---------------------------------------------------------------------------
 
 def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
-    import glob as _glob
+    _p(f"Trying yt-dlp for {video_id} ...")
     url = f"https://www.youtube.com/watch?v={video_id}"
-    # Build subtitle language list: preferred langs + common English fallbacks
-    sub_langs = languages + ["en", "en-US", "en-GB", "en.*"]
-    # Deduplicate while preserving order
-    seen = set()
-    sub_langs = [l for l in sub_langs if not (l in seen or seen.add(l))]
+    # Build full language list with English fallbacks
+    sub_langs = list(dict.fromkeys(languages + ["en", "en-US", "en-GB", "en.*"]))
 
     with tempfile.TemporaryDirectory() as tmpdir:
         base = os.path.join(tmpdir, video_id)
         opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,       # Don't download the video
-            "writesubtitles": True,      # Write manual subtitles
-            "writeautomaticsub": True,   # Write auto-generated subtitles
+            "quiet": False,          # Let yt-dlp print to stdout so we see errors
+            "no_warnings": False,
+            "skip_download": True,   # Don't download the video itself
+            "writesubtitles": True,
+            "writeautomaticsub": True,
             "subtitleslangs": sub_langs,
             "subtitlesformat": "vtt",
             "outtmpl": base,
@@ -170,41 +176,42 @@ def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
         except Exception as e:
-            log.warning("yt-dlp extract_info failed: %s", e)
+            _p(f"yt-dlp extract_info FAILED: {e}")
             return None
 
-        # Find any .vtt file that was written
         vtt_files = _glob.glob(base + "*.vtt")
+        _p(f"yt-dlp: .vtt files found after extraction: {[os.path.basename(f) for f in vtt_files]}")
         if not vtt_files:
-            log.warning("yt-dlp: no .vtt file written to disk")
+            _p("yt-dlp: no subtitle file written — bot block or no captions available")
             return None
 
         vtt_path = sorted(vtt_files)[0]
-        log.info("yt-dlp: found subtitle file %s", os.path.basename(vtt_path))
         try:
             with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
-                return _parse_vtt(f.read())
+                result = _parse_vtt(f.read())
+            if result:
+                _p(f"yt-dlp SUCCESS: {len(result)} chars from {os.path.basename(vtt_path)}")
+            else:
+                _p("yt-dlp: vtt parsed but empty")
+            return result
         except Exception as e:
-            log.warning("yt-dlp: failed to read vtt file: %s", e)
+            _p(f"yt-dlp: failed to read vtt file: {e}")
             return None
 
 
 # ---------------------------------------------------------------------------
-# Primary dispatch — api first, yt-dlp as fallback
+# Primary dispatch
 # ---------------------------------------------------------------------------
 
 def _fetch_transcript(video_id: str, languages: list[str]) -> str | None:
-    log.info("Fetching transcript for %s", video_id)
+    _p(f"=== Fetching transcript for video_id={video_id}, languages={languages} ===")
     text = _fetch_via_api(video_id, languages)
     if text:
-        log.info("Got transcript via youtube-transcript-api")
         return text
-    log.info("Falling back to yt-dlp")
+    _p("youtube-transcript-api failed, falling back to yt-dlp")
     text = _fetch_via_ytdlp(video_id, languages)
-    if text:
-        log.info("Got transcript via yt-dlp")
-    else:
-        log.warning("Both extractors failed for %s", video_id)
+    if not text:
+        _p(f"=== BOTH extractors failed for {video_id} ===")
     return text
 
 
@@ -219,7 +226,7 @@ def _get_video_title(video_id: str) -> str:
                 info = ydl.extract_info(
                     f"https://www.youtube.com/watch?v={video_id}", download=False
                 )
-                return info.get("title", video_id)
+                return info.get("title", video_id) if info else video_id
         except Exception:
             return video_id
 
@@ -240,8 +247,10 @@ def _iter_channel_or_playlist_videos(url: str) -> list[dict]:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                for e in info.get("entries", []):
-                    vid_id = e.get("id") or e.get("url", "")
+                for e in (info or {}).get("entries", []):
+                    if not e:
+                        continue
+                    vid_id = e.get("id") or ""
                     if len(vid_id) == 11:
                         videos.append({
                             "id": vid_id,
@@ -249,7 +258,7 @@ def _iter_channel_or_playlist_videos(url: str) -> list[dict]:
                             "url": f"https://www.youtube.com/watch?v={vid_id}"
                         })
         except Exception as e:
-            log.warning("Channel/playlist enumeration failed: %s", e)
+            _p(f"Channel/playlist enumeration failed: {e}")
     return videos
 
 
@@ -260,6 +269,7 @@ def _iter_channel_or_playlist_videos(url: str) -> list[dict]:
 def extract_single(url: str, languages: list[str]) -> dict | None:
     video_id = _video_id_from_url(url)
     if not video_id:
+        _p(f"Could not extract video_id from URL: {url}")
         return None
     text = _fetch_transcript(video_id, languages)
     if not text:
@@ -279,6 +289,7 @@ def extract_multi(
 ) -> list[dict]:
     videos = _iter_channel_or_playlist_videos(url)
     if not videos:
+        _p("No videos found in channel/playlist")
         return []
 
     results = []
