@@ -1,10 +1,21 @@
 """
-Transcript extraction using youtube-transcript-api (per video)
-and yt-dlp (channel / playlist enumeration).
+Transcript extraction using yt-dlp (primary) and youtube-transcript-api (fallback).
+yt-dlp's subtitle download is more robust against cloud IP blocking.
+Cookies can be supplied via the YT_COOKIES environment variable to further
+reduce blocking — set it to the full text of a Netscape-format cookies.txt file
+exported from your browser while logged into YouTube.
 """
 import re
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+import os
+import glob
+import tempfile
 import yt_dlp
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    _HAS_YT_API = True
+except ImportError:
+    _HAS_YT_API = False
 
 
 # ---------------------------------------------------------------------------
@@ -24,20 +35,92 @@ def _video_id_from_url(url: str) -> str | None:
     return None
 
 
-def _fetch_transcript(video_id: str, languages: list[str]) -> str | None:
-    """Return cleaned transcript text or None."""
+def _cookies_file(tmpdir: str) -> str | None:
+    """Write YT_COOKIES env var to a temp file and return its path, or None."""
+    cookies = os.environ.get("YT_COOKIES", "").strip()
+    if not cookies:
+        return None
+    path = os.path.join(tmpdir, "cookies.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(cookies)
+    return path
+
+
+def _parse_vtt(content: str) -> str | None:
+    """Extract plain text from a WebVTT subtitle file, deduplicating repeated lines."""
+    lines = content.split("\n")
+    texts = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("WEBVTT") or line.startswith("NOTE") or "-->" in line:
+            continue
+        if re.match(r"^\d+$", line):
+            continue
+        line = re.sub(r"<[^>]+>", "", line)   # strip HTML tags
+        line = re.sub(r"&amp;", "&", line)
+        line = re.sub(r"&lt;", "<", line)
+        line = re.sub(r"&gt;", ">", line)
+        line = line.strip()
+        if line:
+            texts.append(line)
+    # Deduplicate consecutive identical lines (VTT often repeats rolling captions)
+    deduped = []
+    for t in texts:
+        if not deduped or t != deduped[-1]:
+            deduped.append(t)
+    text = " ".join(deduped)
+    text = re.sub(r"\[.*?\]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if text else None
+
+
+def _fetch_via_ytdlp(video_id: str, languages: list[str]) -> str | None:
+    """Download subtitles with yt-dlp and parse the VTT result."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": languages + ["en"],  # always try en as last resort
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(tmpdir, "sub.%(ext)s"),
+        }
+        cf = _cookies_file(tmpdir)
+        if cf:
+            opts["cookiefile"] = cf
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception:
+            pass
+
+        # Find any downloaded .vtt file
+        vtt_files = sorted(glob.glob(os.path.join(tmpdir, "*.vtt")))
+        if not vtt_files:
+            return None
+        with open(vtt_files[0], "r", encoding="utf-8") as f:
+            return _parse_vtt(f.read())
+
+
+def _fetch_via_api(video_id: str, languages: list[str]) -> str | None:
+    """Fallback: use youtube-transcript-api."""
+    if not _HAS_YT_API:
+        return None
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        # Prefer manual over auto-generated, in language priority order
         transcript = None
-        # Try manual first
         for lang in languages:
             try:
                 transcript = transcript_list.find_manually_created_transcript([lang])
                 break
             except Exception:
                 pass
-        # Fall back to auto-generated
         if transcript is None:
             for lang in languages:
                 try:
@@ -49,51 +132,65 @@ def _fetch_transcript(video_id: str, languages: list[str]) -> str | None:
             return None
         entries = transcript.fetch()
         text = " ".join(e["text"] for e in entries)
-        # Clean up whitespace and common artefacts
-        text = re.sub(r"\[.*?\]", "", text)          # remove [Music], [Applause] etc.
+        text = re.sub(r"\[.*?\]", "", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text if text else None
-    except (NoTranscriptFound, TranscriptsDisabled):
-        return None
     except Exception:
         return None
+
+
+def _fetch_transcript(video_id: str, languages: list[str]) -> str | None:
+    """Try yt-dlp first, fall back to youtube-transcript-api."""
+    text = _fetch_via_ytdlp(video_id, languages)
+    if text:
+        return text
+    return _fetch_via_api(video_id, languages)
 
 
 def _get_video_title(video_id: str) -> str:
-    """Best-effort title fetch via yt-dlp (quiet)."""
-    try:
+    """Best-effort title fetch via yt-dlp."""
+    with tempfile.TemporaryDirectory() as tmpdir:
         opts = {"quiet": True, "skip_download": True, "no_warnings": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            return info.get("title", video_id)
-    except Exception:
-        return video_id
+        cf = _cookies_file(tmpdir)
+        if cf:
+            opts["cookiefile"] = cf
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={video_id}", download=False
+                )
+                return info.get("title", video_id)
+        except Exception:
+            return video_id
 
 
 def _iter_channel_or_playlist_videos(url: str) -> list[dict]:
     """Return list of {id, title, url} dicts for all videos in channel/playlist."""
-    opts = {
-        "quiet": True,
-        "skip_download": True,
-        "no_warnings": True,
-        "extract_flat": "in_playlist",
-        "playlistend": 5000,  # hard ceiling
-    }
-    videos = []
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            entries = info.get("entries", [])
-            for e in entries:
-                vid_id = e.get("id") or e.get("url", "")
-                if len(vid_id) == 11:
-                    videos.append({
-                        "id": vid_id,
-                        "title": e.get("title", vid_id),
-                        "url": f"https://www.youtube.com/watch?v={vid_id}"
-                    })
-    except Exception:
-        pass
+    with tempfile.TemporaryDirectory() as tmpdir:
+        opts = {
+            "quiet": True,
+            "skip_download": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "playlistend": 5000,
+        }
+        cf = _cookies_file(tmpdir)
+        if cf:
+            opts["cookiefile"] = cf
+        videos = []
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                for e in info.get("entries", []):
+                    vid_id = e.get("id") or e.get("url", "")
+                    if len(vid_id) == 11:
+                        videos.append({
+                            "id": vid_id,
+                            "title": e.get("title", vid_id),
+                            "url": f"https://www.youtube.com/watch?v={vid_id}"
+                        })
+        except Exception:
+            pass
     return videos
 
 
@@ -102,7 +199,6 @@ def _iter_channel_or_playlist_videos(url: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def extract_single(url: str, languages: list[str]) -> dict | None:
-    """Extract transcript from a single video URL. Returns {title, text, video_url} or None."""
     video_id = _video_id_from_url(url)
     if not video_id:
         return None
@@ -122,14 +218,6 @@ def extract_multi(
     languages: list[str],
     progress_cb
 ) -> list[dict]:
-    """
-    Extract transcripts from a channel or playlist.
-
-    scope:
-      "all"        – extract everything available
-      "latest"     – scan first target_n videos, take whatever yields transcripts
-      "guaranteed" – keep scanning until target_n successes or scan_limit reached
-    """
     videos = _iter_channel_or_playlist_videos(url)
     if not videos:
         return []
@@ -139,16 +227,13 @@ def extract_multi(
     extracted = 0
     failed = 0
 
-    # For "all" we process every video
-    # For "latest" we only look at the first target_n
     if scope == "latest":
         videos = videos[:target_n]
 
-    effective_target = target_n  # None means "no limit"
-    effective_scan_limit = scan_limit  # None means scan all
+    effective_target = target_n
+    effective_scan_limit = scan_limit
 
     for v in videos:
-        # Check stopping conditions
         if scope == "guaranteed":
             if effective_target is not None and extracted >= effective_target:
                 break
